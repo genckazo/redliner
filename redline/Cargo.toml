@@ -9,3 +9,9 @@ rune = { workspace = true, default-features = true, features = ["keys-overlay"] 
 
 [lints]
 workspace = true
+
+# The menu-bar item (src/menubar.rs) talks to AppKit directly.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["std", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSResponder", "NSMenu", "NSMenuItem"] }
+objc2-foundation = { workspace = true, features = ["std", "NSString", "NSObject"] }

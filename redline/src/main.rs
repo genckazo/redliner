@@ -6,7 +6,10 @@
 //! model at ~/.redline/models/ggml-base.bin or $REDLINE_MODEL) into the turn's note. Marks are
 //! numbered in the order they were drawn, and the turn's timeline places each mark among the
 //! spoken words, so "change this [mark 1] and this [mark 2]" says which is which.
-//! Closing the small control window quits.
+//! The controls live in the menu bar (macOS); the small control window opens from there.
+
+#[cfg(target_os = "macos")]
+mod menubar;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::path::{Path, PathBuf};
@@ -153,6 +156,9 @@ impl Shared {
     fn set_drawing(&self, on: bool) {
         if on { self.start_mic() } else { self.stop_mic() }
         self.drawing.store(on, Ordering::Relaxed);
+        // The menu bar shows a dot while the pen (and so the mic) is on.
+        #[cfg(target_os = "macos")]
+        menubar::set_title(if on { "● Redline" } else { "Redline" });
         for window in self.overlays.lock().unwrap().iter() {
             if let Err(e) = window.set_click_through(!on) { eprintln!("click-through: {e}"); }
         }
@@ -285,11 +291,9 @@ impl State {
 
 impl Drop for State {
     fn drop(&mut self) {
-        if !self.overlay {
-            self.shared.stop_mic();
-            self.shared.drop_audio();
-            for window in self.shared.overlays.lock().unwrap().iter() { window.close(); }
-        }
+        // The control window can be closed and reopened from the menu bar; quitting is
+        // the menu's job, so nothing to do for it here.
+        let _ = self.overlay;
     }
 }
 
@@ -384,21 +388,48 @@ fn spec() -> AppSpec<State> {
     AppSpec { setup: Some(setup), poll: Some(poll), ..AppSpec::new("Redline", (380.0, 370.0), || State::new(false, 0, Arc::new(Shared::default())), view) }
 }
 
+/// Menu-bar controls: the same actions as the hotkeys, plus the control window and Quit.
+#[cfg(target_os = "macos")]
+fn install_menu(shared: &Arc<Shared>, controls: &rune::AppHandle<State>) {
+    let entry = |label: &'static str, action: menubar::Action| Some((label, action));
+    let (pen, send, clear, stop) = (shared.clone(), shared.clone(), shared.clone(), shared.clone());
+    let (window, quit) = (controls.clone(), controls.clone());
+    menubar::install("Redline", vec![
+        entry("Pen on/off  (Ctrl+Alt+D)", Box::new(move || pen.toggle())),
+        entry("Send to agent  (Ctrl+Alt+S)", Box::new(move || send.send())),
+        entry("Clear ink  (Ctrl+Alt+C)", Box::new(move || clear.clear())),
+        None,
+        entry("Show status window", Box::new(move || window.open())),
+        None,
+        entry("Quit Redline", Box::new(move || { stop.stop_mic(); stop.drop_audio(); quit.quit(); })),
+    ]);
+}
+
 fn main() {
-    rune::run_windows(|displays| {
+    // An accessory app: no Dock icon, and the control window stays closed until asked for.
+    rune::run_windows_with_args(rune::RunOptions { accessory: true }, [], |displays| {
         let shared = Arc::new(Shared::default());
         let controls = App::new(spec())
+            .windowless()
             .global_shortcut("ctrl+alt+d", |s: &mut State, _| s.shared.toggle())
             .global_shortcut("ctrl+alt+c", |s: &mut State, _| s.shared.clear())
             .global_shortcut("ctrl+alt+s", |s: &mut State, _| s.shared.send());
+        #[cfg(target_os = "macos")]
+        let controls_handle = controls.handle();
         let mut windows = vec![WindowSpec::from_app("controls", controls).state(State::new(false, 0, shared.clone()))];
         for (i, display) in displays.iter().enumerate() {
             let handles = shared.clone();
+            #[cfg(target_os = "macos")]
+            let controls_handle = controls_handle.clone();
             windows.push(WindowSpec::new(format!("overlay-{i}"), spec())
                 .state(State::new(true, i, shared.clone()))
                 .options(WindowOptions::overlay(display))
                 .on_created(move |window| {
                     eprintln!("overlay {i} window number: {:?}", window.window_number());
+                    // Overlays are created on the main thread once AppKit is up: the place to
+                    // add the menu-bar item (it only installs once).
+                    #[cfg(target_os = "macos")]
+                    install_menu(&handles, &controls_handle);
                     handles.overlays.lock().unwrap().push(window);
                 }));
         }
