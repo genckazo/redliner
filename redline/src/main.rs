@@ -6,6 +6,9 @@
 //! model at ~/.redline/models/ggml-base.bin or $REDLINE_MODEL) into the turn's note. Marks are
 //! numbered in the order they were drawn, and the turn's timeline places each mark among the
 //! spoken words, so "change this [mark 1] and this [mark 2]" says which is which.
+//! A turn pictures only the window the marks sit on (or the frontmost one when there are no
+//! marks), using the `redline-capture` helper next to this binary; marks spread over several
+//! windows, or "Send whole screen" in the menu, picture the whole screen instead.
 //! The controls live in the menu bar (macOS); the small control window opens from there.
 
 #[cfg(target_os = "macos")]
@@ -48,6 +51,8 @@ struct Shared {
     /// Strokes per overlay (one overlay per display), in that overlay's points.
     ink: Mutex<Vec<Vec<Stroke>>>,
     overlays: Mutex<Vec<WindowHandle>>,
+    /// The overlays' native window ids, so the capture helper can skip them and still draw the ink.
+    overlay_ids: Mutex<Vec<String>>,
     wakers: Mutex<Vec<Waker>>,
     /// The running microphone recorder and the file it writes.
     recorder: Mutex<Option<(std::process::Child, PathBuf, u128)>>,
@@ -174,13 +179,13 @@ impl Shared {
     }
     /// Pen off (so the hint and border are not in the picture), capture every display with the
     /// ink still showing, write the turn, then clear the ink.
-    fn send(self: &Arc<Self>) {
+    fn send(self: &Arc<Self>, whole_screen: bool) {
         let shared = self.clone();
         shared.set_drawing(false);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(250));
             let audio: Vec<(PathBuf, u128)> = shared.audio.lock().unwrap().drain(..).collect();
-            match write_turn(&shared, &audio) {
+            match write_turn(&shared, &audio, whole_screen) {
                 Ok(dir) => { eprintln!("turn written: {}", dir.display()); shared.sent.fetch_add(1, Ordering::Relaxed); }
                 Err(e) => eprintln!("turn failed: {e}"),
             }
@@ -199,16 +204,65 @@ fn mark_order(ink: &[Vec<Stroke>]) -> Vec<(usize, usize)> {
     order.into_iter().map(|(_, d, i)| (d, i)).collect()
 }
 
-fn write_turn(shared: &Shared, audio: &[(PathBuf, u128)]) -> std::io::Result<PathBuf> {
+/// The window a turn pictured: its frame in screen points, and what it is.
+struct Pictured {
+    x: f32,
+    y: f32,
+    app: String,
+    title: String,
+}
+
+/// Picture only the window under the marks (display 0's overlay starts at the screen's origin,
+/// so its points are screen points). None when no single window fits or the helper is missing.
+fn capture_window(shared: &Shared, ink: &[Vec<Stroke>], order: &[(usize, usize)], out: &Path) -> Option<Pictured> {
+    if order.iter().any(|&(d, _)| d != 0) { return None; }
+    let helper = std::env::current_exe().ok()?.parent()?.join("redline-capture");
+    if !helper.is_file() { return None; }
+    let centres = order.iter().map(|&(d, i)| {
+        let points = &ink[d][i].points;
+        let (x0, x1) = points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
+        let (y0, y1) = points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[1]), hi.max(p[1])));
+        format!("{:.0},{:.0}", (x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    }).collect::<Vec<_>>().join(";");
+    let mut command = Command::new(helper);
+    command.arg("--out").arg(out).arg("--overlay").arg(shared.overlay_ids.lock().unwrap().join(","));
+    if !centres.is_empty() { command.arg("--points").arg(centres); }
+    let result = command.output().ok()?;
+    if !result.status.success() {
+        eprintln!("capture: whole screen ({})", String::from_utf8_lossy(&result.stderr).trim());
+        return None;
+    }
+    // `window <x> <y> <w> <h> <app> <title>`, tab-separated.
+    let line = String::from_utf8_lossy(&result.stdout);
+    let mut fields = line.trim_end_matches('\n').split('\t');
+    if fields.next()? != "window" { return None; }
+    let (x, y) = (fields.next()?.parse().ok()?, fields.next()?.parse().ok()?);
+    let (_w, _h) = (fields.next()?, fields.next()?);
+    Some(Pictured { x, y, app: fields.next().unwrap_or("").to_string(), title: fields.next().unwrap_or("").to_string() })
+}
+
+fn write_turn(shared: &Shared, audio: &[(PathBuf, u128)], whole_screen: bool) -> std::io::Result<PathBuf> {
     let ink = shared.ink.lock().unwrap().clone();
     let id = now_ms();
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let dir = home.join(".redline").join("turns").join(id.to_string());
     std::fs::create_dir_all(&dir)?;
-    let files: Vec<PathBuf> = (0..ink.len().max(1)).map(|i| dir.join(format!("screen-{i}.png"))).collect();
-    // macOS only for now: one file per display. Linux will use the screenshot portal.
-    let status = Command::new("screencapture").arg("-x").args(&files).status()?;
-    if !status.success() { return Err(std::io::Error::other("screencapture failed (Screen Recording permission?)")); }
+    let order = mark_order(&ink);
+    let mut files: Vec<PathBuf> = (0..ink.len().max(1)).map(|i| dir.join(format!("screen-{i}.png"))).collect();
+    let pictured = if whole_screen { None } else { capture_window(shared, &ink, &order, &files[0]) };
+    if pictured.is_some() {
+        files.truncate(1);
+    } else {
+        // macOS only for now: one file per display. Linux will use the screenshot portal.
+        let status = Command::new("screencapture").arg("-x").args(&files).status()?;
+        if !status.success() { return Err(std::io::Error::other("screencapture failed (Screen Recording permission?)")); }
+    }
+    // Marks are reported relative to the picture: the window's corner when only it was pictured.
+    let (off_x, off_y) = pictured.as_ref().map(|p| (p.x, p.y)).unwrap_or((0.0, 0.0));
+    let capture = match &pictured {
+        Some(p) => format!("{{\"mode\":\"window\",\"app\":{},\"title\":{}}}", json_string(&p.app), json_string(&p.title)),
+        None => "{\"mode\":\"screen\"}".to_string(),
+    };
     // The picture is taken, so the ink can go while the speech is transcribed.
     for strokes in shared.ink.lock().unwrap().iter_mut() { strokes.clear(); }
     shared.clear.fetch_add(1, Ordering::Relaxed);
@@ -230,7 +284,6 @@ fn write_turn(shared: &Shared, audio: &[(PathBuf, u128)]) -> std::io::Result<Pat
     if audio.is_empty() { eprintln!("mic: nothing was recorded for this turn"); }
 
     // One clock for words and marks: seconds since the turn's first word or stroke.
-    let order = mark_order(&ink);
     let zero = audio.iter().map(|(_, began)| *began).chain(order.iter().map(|&(d, i)| ink[d][i].start)).min().unwrap_or(id);
     let secs = |at: u128| at.saturating_sub(zero) as f64 / 1000.0;
     // The timeline drops each mark in among the words at the moment its stroke began.
@@ -251,14 +304,14 @@ fn write_turn(shared: &Shared, audio: &[(PathBuf, u128)]) -> std::io::Result<Pat
         let marks: Vec<String> = order.iter().enumerate().filter(|(_, (on, _))| *on == d).map(|(n, &(_, i))| {
             let stroke = &ink[d][i];
             let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-            for [x, y] in &stroke.points { x0 = x0.min(*x); y0 = y0.min(*y); x1 = x1.max(*x); y1 = y1.max(*y); }
+            for [x, y] in &stroke.points { x0 = x0.min(*x - off_x); y0 = y0.min(*y - off_y); x1 = x1.max(*x - off_x); y1 = y1.max(*y - off_y); }
             format!("{{\"n\":{},\"t_start\":{:.1},\"t_end\":{:.1},\"bbox_points\":[{x0:.0},{y0:.0},{x1:.0},{y1:.0}]}}", n + 1, secs(stroke.start), secs(stroke.end))
         }).collect();
         displays.push(format!("{{\"display\":{d},\"image\":\"screen-{d}.jpg\",\"full_image\":\"screen-{d}.png\",\"marks\":[{}]}}", marks.join(",")));
     }
     // turn.json is written last: its presence means the turn is complete.
     std::fs::write(dir.join("turn.json"), format!(
-        "{{\"id\":\"{id}\",\"note\":{note}{note_error},\"timeline\":{},\"recorded_seconds\":{seconds:.1},\"audio_peak\":{peak:.3},\"words\":[{word_list}],\"displays\":[{}]}}\n",
+        "{{\"id\":\"{id}\",\"note\":{note}{note_error},\"timeline\":{},\"capture\":{capture},\"recorded_seconds\":{seconds:.1},\"audio_peak\":{peak:.3},\"words\":[{word_list}],\"displays\":[{}]}}\n",
         json_string(&timeline), displays.join(",")))?;
     Ok(dir)
 }
@@ -349,7 +402,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
         .child(text(format!("Turns sent to the agent: {}", s.seen_sent)).color(Color::WHITE.alpha(0.6)))
         .child(text(speech_status(s.mic)).color(Color::WHITE.alpha(0.6)))
         .child(button("Toggle pen", |s| s.shared.toggle()))
-        .child(button("Send to agent", |s| s.shared.send()))
+        .child(button("Send to agent", |s| s.shared.send(false)))
         .child(button("Clear ink", |s| s.shared.clear()))
 }
 
@@ -379,7 +432,7 @@ fn setup(s: &mut State, waker: Waker) {
     // REDLINE_AUTOSEND=1 sends one turn two seconds after launch, to test the bridge unattended.
     if !s.overlay && std::env::var_os("REDLINE_AUTOSEND").is_some() {
         let shared = s.shared.clone();
-        std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_secs(2)); shared.send(); });
+        std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_secs(2)); shared.send(false); });
     }
 }
 
@@ -392,11 +445,12 @@ fn spec() -> AppSpec<State> {
 #[cfg(target_os = "macos")]
 fn install_menu(shared: &Arc<Shared>, controls: &rune::AppHandle<State>) {
     let entry = |label: &'static str, action: menubar::Action| Some((label, action));
-    let (pen, send, clear, stop) = (shared.clone(), shared.clone(), shared.clone(), shared.clone());
+    let (pen, send, clear, stop, screen) = (shared.clone(), shared.clone(), shared.clone(), shared.clone(), shared.clone());
     let (window, quit) = (controls.clone(), controls.clone());
     menubar::install("Redline", vec![
         entry("Pen on/off  (Ctrl+Alt+D)", Box::new(move || pen.toggle())),
-        entry("Send to agent  (Ctrl+Alt+S)", Box::new(move || send.send())),
+        entry("Send to agent  (Ctrl+Alt+S)", Box::new(move || send.send(false))),
+        entry("Send whole screen", Box::new(move || screen.send(true))),
         entry("Clear ink  (Ctrl+Alt+C)", Box::new(move || clear.clear())),
         None,
         entry("Show status window", Box::new(move || window.open())),
@@ -413,7 +467,7 @@ fn main() {
             .windowless()
             .global_shortcut("ctrl+alt+d", |s: &mut State, _| s.shared.toggle())
             .global_shortcut("ctrl+alt+c", |s: &mut State, _| s.shared.clear())
-            .global_shortcut("ctrl+alt+s", |s: &mut State, _| s.shared.send());
+            .global_shortcut("ctrl+alt+s", |s: &mut State, _| s.shared.send(false));
         #[cfg(target_os = "macos")]
         let controls_handle = controls.handle();
         let mut windows = vec![WindowSpec::from_app("controls", controls).state(State::new(false, 0, shared.clone()))];
@@ -425,7 +479,7 @@ fn main() {
                 .state(State::new(true, i, shared.clone()))
                 .options(WindowOptions::overlay(display))
                 .on_created(move |window| {
-                    eprintln!("overlay {i} window number: {:?}", window.window_number());
+                    if let Some(number) = window.window_number() { handles.overlay_ids.lock().unwrap().push(number.to_string()); }
                     // Overlays are created on the main thread once AppKit is up: the place to
                     // add the menu-bar item (it only installs once).
                     #[cfg(target_os = "macos")]

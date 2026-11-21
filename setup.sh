@@ -26,4 +26,9 @@ if ! grep -q '"examples/redline"' rune-src/Cargo.toml; then
 	awk '{ print } /^    "examples\/overlay",$/ { print "    \"examples/redline\"," }' rune-src/Cargo.toml > rune-src/Cargo.toml.new
 	mv rune-src/Cargo.toml.new rune-src/Cargo.toml
 fi
+# The window-capture helper (macOS, ScreenCaptureKit) sits next to the redline binary.
+if [ "$(uname)" = "Darwin" ]; then
+	mkdir -p rune-src/target/release
+	swiftc -O redline/capture/main.swift -o rune-src/target/release/redline-capture
+fi
 echo "Ready: cd rune-src && cargo build --release -p redline"
