@@ -37,7 +37,7 @@ thread_local! {
 }
 
 /// Add the menu-bar item once. `entries` are (label, action); `None` is a separator.
-pub fn install(title: &str, entries: Vec<Option<(&str, Action)>>) {
+pub fn install(title: &str, entries: Vec<Option<(String, Action)>>) {
     let Some(mtm) = MainThreadMarker::new() else { eprintln!("redline: menu bar skipped, not on the main thread"); return };
     if INSTALLED.with(|slot| slot.borrow().is_some()) { return; }
     let menu = NSMenu::new(mtm);
@@ -50,7 +50,7 @@ pub fn install(title: &str, entries: Vec<Option<(&str, Action)>>) {
                 menu.addItem(&NSMenuItem::separatorItem(mtm));
                 continue;
             };
-            let row = NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(label), Some(sel!(redlineMenuAction:)), &NSString::from_str(""));
+            let row = NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(&label), Some(sel!(redlineMenuAction:)), &NSString::from_str(""));
             let target: Retained<Target> = msg_send![super(mtm.alloc().set_ivars(action)), init];
             row.setTarget(Some(&target));
             targets.push(target);

@@ -1,6 +1,10 @@
-# Rune checkout (cloned from github.com/anomalyco/rune) and its build output
-rune-src/
+# Build output
+redline/target/
+redline/target-tooling/
+dist/
 node_modules/
+# A local Rune checkout, kept only for reading its source
+rune-src/
 # The shared canvas's saved board and uploads
 canvas/board/
 .DS_Store

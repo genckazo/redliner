@@ -1,17 +1,34 @@
 [package]
 name = "redline"
-version = "0.0.1"
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+description = "Draw on your screen, talk, and send it to your coding agent."
 
+# Rune is pre-release: pin one revision of `dev` and use the same one for every patch below.
 [dependencies]
-rune = { workspace = true, default-features = true, features = ["keys-overlay"] }
-
-[lints]
-workspace = true
+rune = { git = "https://github.com/anomalyco/rune", rev = "8d81d77022927557f0a9f12520162cfb8c5c4fe9" }
+serde_json = "1"
 
 # The menu-bar item (src/menubar.rs) talks to AppKit directly.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["std", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSResponder", "NSMenu", "NSMenuItem"] }
-objc2-foundation = { workspace = true, features = ["std", "NSString", "NSObject"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSResponder", "NSMenu", "NSMenuItem"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSObject"] }
+
+# Cargo doesn't inherit a dependency's patches, so Rune's are repeated here (see "Depending on
+# Rune" in its README). Keep the revision in step with the `rune` dependency above.
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "8d81d77022927557f0a9f12520162cfb8c5c4fe9" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "8d81d77022927557f0a9f12520162cfb8c5c4fe9" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "8d81d77022927557f0a9f12520162cfb8c5c4fe9" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "8d81d77022927557f0a9f12520162cfb8c5c4fe9" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "8d81d77022927557f0a9f12520162cfb8c5c4fe9" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "8d81d77022927557f0a9f12520162cfb8c5c4fe9" }
+
+[profile.release]
+codegen-units = 16
+
+# Rune's headless tooling (--snap, --tree, --script) in a release build, for tests:
+#   cargo build --release --features tooling
+[features]
+tooling = ["rune/tooling"]
