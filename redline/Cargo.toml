@@ -2,6 +2,7 @@
 name = "redline"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "Draw on your screen, talk, and send it to your coding agent."
 
 # Rune is pre-release: pin one revision of `dev` and use the same one for every patch below.

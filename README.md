@@ -148,3 +148,7 @@ Not done or not tested:
 | `canvas/` | An earlier experiment: a tldraw board an agent can read and write |
 | `demo-site/` | A one-page site to try Redline on |
 | `scripts/` | The macOS build script |
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
