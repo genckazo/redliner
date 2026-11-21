@@ -1,0 +1,6 @@
+# Rune checkout (cloned from github.com/anomalyco/rune) and its build output
+rune-src/
+node_modules/
+# The shared canvas's saved board and uploads
+canvas/board/
+.DS_Store
